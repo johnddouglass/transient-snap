@@ -164,6 +164,7 @@ class TransientSnapV2(ctk.CTk):
         self.tick = None
         self.tick_path = DEFAULT_TICK
         self._fixed_bpm_var = tk.BooleanVar(value=True)
+        self._split_tracks_var = tk.BooleanVar(value=False)
         self.display_ms = 5.0
         self.output_ppq = 28800
         self._track_idx_map = {}
@@ -437,6 +438,8 @@ class TransientSnapV2(ctk.CTk):
         settings_menu.add_separator()
         settings_menu.add_checkbutton(label="Fixed 120 BPM MIDI Export",
                                       variable=self._fixed_bpm_var)
+        settings_menu.add_checkbutton(label="Split Merged Tracks on WAV Export",
+                                      variable=self._split_tracks_var)
 
     def _bind_keys(self):
         self.bind_all('<space>', self._on_key_accept)
@@ -915,16 +918,14 @@ class TransientSnapV2(ctk.CTk):
                 seen.add(trk_idx)
                 unique_tracks.append(trk_idx)
 
-        if len(unique_tracks) <= 1:
-            self._track_combo_values = []
-            self.track_combo.configure(values=[])
-            self.track_combo.set('')
-            return
-
         track_names = [elem.track_names.get(i, f"Track {i}") for i in unique_tracks]
         self._track_combo_values = track_names
         self.track_combo.configure(values=track_names)
         self._track_idx_map = {name: idx for name, idx in zip(track_names, unique_tracks)}
+        # Set displayed value to whichever track the current marker belongs to
+        current_track = elem.track_assignments[elem.current_idx] if elem.track_assignments is not None else unique_tracks[0]
+        current_name = elem.track_names.get(current_track, f"Track {current_track}")
+        self.track_combo.set(current_name if current_name in track_names else track_names[0])
 
     def _on_track_change(self, _=None):
         elem = self._current_element()
@@ -1046,7 +1047,7 @@ class TransientSnapV2(ctk.CTk):
         # Marker entry + track combo
         self.marker_var.set(str(mi + 1))
 
-        if elem.track_assignments is not None and len(set(elem.track_assignments)) > 1:
+        if elem.track_assignments is not None and len(elem.track_assignments) > 0:
             if not self._track_combo_values:
                 self._update_track_combo()
             trk_idx  = elem.track_assignments[mi]
@@ -1331,12 +1332,36 @@ class TransientSnapV2(ctk.CTk):
             for elem in self.elements:
                 if elem.n_markers == 0:
                     continue
-                wav_name = f"{elem.name.replace(' ', '_')}_refined.wav"
-                wav_path = output_dir / wav_name
-                save_markers_wav(
-                    elem.final_positions, elem.sr, str(wav_path),
-                    self.tick, len(elem.audio), elem.amplitudes)
-                wav_files.append(wav_name)
+
+                split = (self._split_tracks_var.get()
+                         and elem.track_assignments is not None
+                         and len(set(elem.track_assignments)) > 1)
+
+                if split:
+                    unique_tracks = []
+                    seen = set()
+                    for t in elem.track_assignments:
+                        if t not in seen:
+                            seen.add(t)
+                            unique_tracks.append(t)
+                    for orig_track in unique_tracks:
+                        mask = np.array(elem.track_assignments) == orig_track
+                        positions  = np.array(elem.final_positions)[mask]
+                        amplitudes = np.array(elem.amplitudes)[mask] if elem.amplitudes is not None else None
+                        track_label = elem.track_names.get(orig_track, f"{elem.name}_track{orig_track}")
+                        wav_name = f"{track_label.replace(' ', '_')}_refined.wav"
+                        wav_path = output_dir / wav_name
+                        save_markers_wav(
+                            positions, elem.sr, str(wav_path),
+                            self.tick, len(elem.audio), amplitudes)
+                        wav_files.append(wav_name)
+                else:
+                    wav_name = f"{elem.name.replace(' ', '_')}_refined.wav"
+                    wav_path = output_dir / wav_name
+                    save_markers_wav(
+                        elem.final_positions, elem.sr, str(wav_path),
+                        self.tick, len(elem.audio), elem.amplitudes)
+                    wav_files.append(wav_name)
 
             wav_list = '\n'.join(wav_files) if wav_files else "(none)"
             messagebox.showinfo("Exported",
