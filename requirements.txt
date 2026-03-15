@@ -1,0 +1,7 @@
+numpy
+soundfile
+librosa
+mido
+scipy
+matplotlib
+customtkinter
