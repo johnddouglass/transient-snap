@@ -1,5 +1,7 @@
 # Transient Snap
 
+![Transient Snap](https://github.com/user-attachments/assets/e1fec109-ac62-4106-8003-e834f343cec3)
+
 A drum sample alignment tool. Import a MIDI file, link audio files to each kit element, and place transient markers that export as sample-accurate WAV cue points and MIDI notes.
 
 Designed for the workflow of aligning multi-mic drum recordings to a "perfect" MIDI grid — place one transient marker per hit, and the tool handles converting sample positions to MIDI note timing.
