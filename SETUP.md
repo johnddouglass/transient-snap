@@ -4,7 +4,7 @@
 
 - **Python 3.8+** (with tkinter)
 - **pip** (Python package manager, included with Python)
-- The Transient Snap project files (`snap.py`, `gui_v2.py`)
+- The Transient Snap project files (`snap.py`, `transient_snap.py`)
 
 ---
 
@@ -52,7 +52,7 @@ pip3 install --user numpy soundfile librosa mido scipy matplotlib customtkinter
 
 ```bash
 cd /path/to/transient_snap
-python3 gui_v2.py
+python3 transient_snap.py
 ```
 
 ---
@@ -98,7 +98,7 @@ pip install numpy soundfile librosa mido scipy matplotlib customtkinter
 
 ```cmd
 cd C:\path\to\transient_snap
-python gui_v2.py
+python transient_snap.py
 ```
 
 ---
@@ -169,4 +169,4 @@ On first use, if the default tick WAV isn't found at the expected path, go to **
 | Python command | `python3` | `python` |
 | Pip command | `pip3` | `pip` |
 | Terminal | Terminal.app | Command Prompt (cmd) |
-| Run the app | `python3 gui_v2.py` | `python gui_v2.py` |
+| Run the app | `python3 transient_snap.py` | `python transient_snap.py` |

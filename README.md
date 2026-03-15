@@ -26,7 +26,7 @@ See [SETUP.md](SETUP.md) for full installation instructions for macOS and Window
 
 ```bash
 pip install -r requirements.txt
-python gui_v2.py        # macOS: python3 gui_v2.py
+python transient_snap.py        # macOS: python3 transient_snap.py
 ```
 
 ---
@@ -59,7 +59,7 @@ python gui_v2.py        # macOS: python3 gui_v2.py
 
 | File | Description |
 |------|-------------|
-| `gui_v2.py` | Main application |
+| `transient_snap.py` | Main application |
 | `snap.py` | Audio/MIDI processing backend |
 | `Tick_44k.wav` | Default tick sample (44.1kHz) |
 | `Tick_48k.wav` | Default tick sample (48kHz) |
