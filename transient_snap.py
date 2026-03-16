@@ -620,7 +620,7 @@ class TransientSnapV2(ctk.CTk):
             elem.note_values = elem.note_values[keep]
         elem.status = [s for s, k in zip(elem.status, keep) if k]
         # Keep idx in bounds, stay on same position (now the next hit)
-        elem.current_idx = min(mi, elem.n_markers - 1)
+        elem.current_idx = max(0, min(mi, elem.n_markers - 1))
         self._show_current()
 
     # ── Current element helpers ──────────────────────────────────────────

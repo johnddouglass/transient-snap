@@ -474,8 +474,8 @@ def save_markers_midi(positions, sample_rate, output_path, amplitudes=None,
                     n = int(trk_note_values[i])
 
                 track.append(mido.Message('note_on', note=n, velocity=vel, time=delta))
-                track.append(mido.Message('note_off', note=n, velocity=0, time=note_len))
-                prev_tick = abs_tick + note_len
+                track.append(mido.Message('note_off', note=n, velocity=0, time=0))
+                prev_tick = abs_tick
 
             if debug and errors:
                 print(f"\n=== MIDI ROUND-TRIP ERRORS for track '{name}' ({len(errors)}) ===")
@@ -524,8 +524,8 @@ def save_markers_midi(positions, sample_rate, output_path, amplitudes=None,
                 n = int(note_values[i])
 
             track.append(mido.Message('note_on', note=n, velocity=vel, time=delta))
-            track.append(mido.Message('note_off', note=n, velocity=0, time=note_len))
-            prev_tick = abs_tick + note_len
+            track.append(mido.Message('note_off', note=n, velocity=0, time=0))
+            prev_tick = abs_tick
 
         if debug and errors:
             print(f"\n=== MIDI ROUND-TRIP ERRORS ({len(errors)}/{len(positions)}) ===")
