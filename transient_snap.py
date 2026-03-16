@@ -165,6 +165,8 @@ class TransientSnapV2(ctk.CTk):
         self.tick_path = DEFAULT_TICK
         self._fixed_bpm_var = tk.BooleanVar(value=True)
         self._split_tracks_var = tk.BooleanVar(value=False)
+        self._WAVEFORM_MODES = ['line', 'filled', 'envelope', 'rms']
+        self._waveform_mode = 0   # index into _WAVEFORM_MODES
         self.display_ms = 5.0
         self.output_ppq = 28800
         self._track_idx_map = {}
@@ -454,6 +456,9 @@ class TransientSnapV2(ctk.CTk):
         self.bind_all('q', self._on_key_place)
         self.bind_all('w', self._on_key_wide_press)
         self.bind_all('<KeyRelease-w>', self._on_key_wide_release)
+        self.bind_all('v', self._on_key_waveform_mode)
+        self.bind_all('<Delete>', self._on_key_delete)
+        self.bind_all('<BackSpace>', self._on_key_delete)
 
     # ── Sidebar element list ─────────────────────────────────────────────
 
@@ -594,6 +599,29 @@ class TransientSnapV2(ctk.CTk):
             self._next()
         else:
             self._show_current()
+
+    def _on_key_delete(self, event):
+        if not self._is_typing(event):
+            self._delete_current()
+
+    def _delete_current(self):
+        elem = self._current_element()
+        if elem is None or elem.n_markers == 0:
+            return
+        mi = elem.current_idx
+        keep = np.ones(elem.n_markers, dtype=bool)
+        keep[mi] = False
+        elem.final_positions    = elem.final_positions[keep]
+        elem.original_positions = elem.original_positions[keep]
+        elem.amplitudes         = elem.amplitudes[keep] if elem.amplitudes is not None else None
+        if elem.track_assignments is not None:
+            elem.track_assignments = elem.track_assignments[keep]
+        if elem.note_values is not None:
+            elem.note_values = elem.note_values[keep]
+        elem.status = [s for s, k in zip(elem.status, keep) if k]
+        # Keep idx in bounds, stay on same position (now the next hit)
+        elem.current_idx = min(mi, elem.n_markers - 1)
+        self._show_current()
 
     # ── Current element helpers ──────────────────────────────────────────
 
@@ -943,6 +971,55 @@ class TransientSnapV2(ctk.CTk):
 
     # ── Display ──────────────────────────────────────────────────────────
 
+    def _on_key_waveform_mode(self, event):
+        if self._is_typing(event):
+            return
+        self._waveform_mode = (self._waveform_mode + 1) % len(self._WAVEFORM_MODES)
+        self._show_current()
+
+    def _draw_waveform(self, time_ms, wave):
+        """Draw waveform in current mode. time_ms and wave are numpy arrays."""
+        mode = self._WAVEFORM_MODES[self._waveform_mode]
+        N_BINS = 1200  # target bins for envelope/rms modes
+
+        if mode == 'line':
+            self.ax.plot(time_ms, wave, color='#4e5870', linewidth=0.6)
+
+        elif mode == 'filled':
+            self.ax.plot(time_ms, wave, color='#5a6a8a', linewidth=0.5)
+            self.ax.fill_between(time_ms, wave, 0,
+                                 color='#3a4a6a', alpha=0.55)
+
+        elif mode == 'envelope':
+            n = len(wave)
+            if n <= N_BINS:
+                # Not enough samples to bin — just filled line
+                self.ax.plot(time_ms, wave, color='#5a6a8a', linewidth=0.5)
+                self.ax.fill_between(time_ms, wave, 0, color='#3a4a6a', alpha=0.55)
+            else:
+                bins = np.array_split(np.arange(n), N_BINS)
+                t_bin  = np.array([time_ms[b[len(b)//2]] for b in bins])
+                w_min  = np.array([wave[b].min() for b in bins])
+                w_max  = np.array([wave[b].max() for b in bins])
+                self.ax.fill_between(t_bin, w_min, w_max,
+                                     color='#4e6a9a', alpha=0.75)
+                self.ax.plot(t_bin, w_max, color='#6a8aba', linewidth=0.4, alpha=0.8)
+                self.ax.plot(t_bin, w_min, color='#6a8aba', linewidth=0.4, alpha=0.8)
+
+        elif mode == 'rms':
+            n = len(wave)
+            if n <= N_BINS:
+                self.ax.plot(time_ms, wave, color='#5a6a8a', linewidth=0.5)
+                self.ax.fill_between(time_ms, wave, 0, color='#3a4a6a', alpha=0.55)
+            else:
+                bins = np.array_split(np.arange(n), N_BINS)
+                t_bin = np.array([time_ms[b[len(b)//2]] for b in bins])
+                rms   = np.array([np.sqrt(np.mean(wave[b] ** 2)) for b in bins])
+                self.ax.fill_between(t_bin, -rms, rms,
+                                     color='#4a7a6a', alpha=0.75)
+                self.ax.plot(t_bin,  rms, color='#6aaa8a', linewidth=0.5, alpha=0.9)
+                self.ax.plot(t_bin, -rms, color='#6aaa8a', linewidth=0.5, alpha=0.9)
+
     def _show_current(self):
         elem = self._current_element()
         if elem is None or elem.audio is None or elem.n_markers == 0:
@@ -975,8 +1052,7 @@ class TransientSnapV2(ctk.CTk):
         self.ax.clear()
         self.ax.set_facecolor(self._BG)
 
-        self.ax.plot(time_ms, elem.audio[audio_start:audio_end],
-                     color='#4e5870', linewidth=0.6)
+        self._draw_waveform(time_ms, elem.audio[audio_start:audio_end])
 
         orig_ms = (orig - pos) / elem.sr * 1000
         self.ax.axvline(orig_ms, color='#ef4444', linewidth=1.5,
@@ -999,8 +1075,9 @@ class TransientSnapV2(ctk.CTk):
             trk_idx  = elem.track_assignments[mi]
             trk_name = elem.track_names.get(trk_idx, f"Track {trk_idx}")
             track_info = f" [{trk_name}]"
+        mode_name = self._WAVEFORM_MODES[self._waveform_mode].upper()
         self.ax.set_title(
-            f"{elem.name}{track_info}  ·  Marker {mi+1}/{elem.n_markers}  ·  {status.upper()}",
+            f"{elem.name}{track_info}  ·  Marker {mi+1}/{elem.n_markers}  ·  {status.upper()}  ·  [V] {mode_name}",
             color=STATUS_COLORS.get(status, self._FG), fontsize=11, pad=6
         )
 
@@ -1211,7 +1288,10 @@ class TransientSnapV2(ctk.CTk):
         mi = elem.current_idx
         if elem.status[mi] == 'pending':
             elem.status[mi] = 'approved'
-        self._next()
+        if elem.current_idx < elem.n_markers - 1:
+            self._next()
+        else:
+            self._show_current()
 
     def _accept_all(self):
         elem = self._current_element()
