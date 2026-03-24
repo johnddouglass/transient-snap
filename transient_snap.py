@@ -1249,7 +1249,7 @@ class TransientSnapV2(ctk.CTk):
 
     def _on_click(self, event):
         elem = self._current_element()
-        if elem is None or event.inaxes != self.ax or event.xdata is None:
+        if elem is None or elem.final_positions is None or event.inaxes != self.ax or event.xdata is None:
             self.focus_force()
             return
 
