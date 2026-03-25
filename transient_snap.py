@@ -168,6 +168,8 @@ class TransientSnapV2(ctk.CTk):
         self._WAVEFORM_MODES = ['line', 'filled', 'envelope', 'rms']
         self._waveform_mode = 0   # index into _WAVEFORM_MODES
         self.display_ms = 5.0
+        self.wide_zoom_ms = 200.0
+        self._view_offset_ms = 0.0
         self.output_ppq = 28800
         self._track_idx_map = {}
         self._track_combo_values = []
@@ -436,6 +438,7 @@ class TransientSnapV2(ctk.CTk):
         settings_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Settings", menu=settings_menu)
         settings_menu.add_command(label="Output PPQ...", command=self._set_ppq)
+        settings_menu.add_command(label="W Key Zoom Level...", command=self._set_wide_zoom)
         settings_menu.add_command(label="Tick Sample...", command=self._set_tick)
         settings_menu.add_separator()
         settings_menu.add_checkbutton(label="Fixed 120 BPM MIDI Export",
@@ -569,7 +572,8 @@ class TransientSnapV2(ctk.CTk):
             return  # already active (key repeat)
         self._wide_zoom_active = True
         self._saved_display_ms = self.display_ms
-        self.display_ms = 1000.0
+        self._view_offset_ms = 0.0
+        self.display_ms = self.wide_zoom_ms
         self.zoom_var.set(min(self.display_ms, 200.0))
         self.zoom_label.configure(text=f"±{self.display_ms:.0f}ms")
         self._show_current()
@@ -578,6 +582,7 @@ class TransientSnapV2(ctk.CTk):
         if not hasattr(self, '_wide_zoom_active') or not self._wide_zoom_active:
             return
         self._wide_zoom_active = False
+        self._view_offset_ms = self._last_mouse_xdata if self._last_mouse_xdata is not None else 0.0
         self.display_ms = self._saved_display_ms
         self.zoom_var.set(self.display_ms)
         self.zoom_label.configure(text=f"±{self.display_ms:.1f}ms")
@@ -911,6 +916,56 @@ class TransientSnapV2(ctk.CTk):
 
         dialog.wait_window()
 
+    def _set_wide_zoom(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("W Key Zoom Level")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.after(100, dialog.lift)
+
+        ctk.CTkLabel(dialog, text="Zoom window when W is held (±ms):",
+                     text_color=self._FG).pack(padx=20, pady=(20, 8))
+
+        zoom_var = tk.StringVar(value=str(int(self.wide_zoom_ms)))
+        entry = ctk.CTkEntry(dialog, textvariable=zoom_var, width=140,
+                             fg_color=self._ENTRY, border_color=self._BORDER)
+        entry.pack(padx=20, pady=(0, 10))
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        preset_frame = ctk.CTkFrame(dialog, fg_color='transparent')
+        preset_frame.pack(pady=(0, 10))
+        ctk.CTkLabel(preset_frame, text="Presets:", text_color=self._FG_DIM).pack(side='left', padx=(0, 6))
+        for val in [100, 200, 500, 1000]:
+            ctk.CTkButton(preset_frame, text=f"{val}ms",
+                          command=lambda v=val: zoom_var.set(str(v)),
+                          width=62, height=26,
+                          fg_color=self._ENTRY, hover_color='#303338',
+                          text_color=self._FG,
+                          font=ctk.CTkFont(size=11)).pack(side='left', padx=2)
+
+        def on_ok():
+            try:
+                val = float(zoom_var.get())
+                if val < 1:
+                    raise ValueError("Zoom must be at least 1ms")
+                self.wide_zoom_ms = val
+                dialog.destroy()
+            except ValueError as e:
+                messagebox.showerror("Invalid", f"Invalid zoom value: {e}")
+
+        entry.bind('<Return>', lambda _: on_ok())
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color='transparent')
+        btn_frame.pack(pady=(0, 16))
+        ctk.CTkButton(btn_frame, text="OK", command=on_ok, width=80).pack(side='left', padx=6)
+        ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy, width=80,
+                      fg_color=self._ENTRY, hover_color='#303338',
+                      text_color=self._FG).pack(side='left', padx=6)
+
+        dialog.wait_window()
+
     def _set_tick(self):
         """Choose the tick template WAV used for WAV export."""
         path = filedialog.askopenfilename(
@@ -1043,9 +1098,11 @@ class TransientSnapV2(ctk.CTk):
         pos  = int(elem.final_positions[mi])
         orig = int(elem.original_positions[mi])
         display_samples = int(elem.sr * self.display_ms / 1000)
+        view_offset_samples = int(elem.sr * self._view_offset_ms / 1000)
 
-        audio_start = max(0, pos - display_samples)
-        audio_end   = min(len(elem.audio), pos + display_samples)
+        center_sample = pos + view_offset_samples
+        audio_start = max(0, center_sample - display_samples)
+        audio_end   = min(len(elem.audio), center_sample + display_samples)
         samples  = np.arange(audio_start, audio_end)
         time_ms  = (samples - pos) / elem.sr * 1000
 
@@ -1060,7 +1117,7 @@ class TransientSnapV2(ctk.CTk):
         self.ax.axvline(0, color=self._GREEN, linewidth=2, alpha=0.65, label='Current')
 
         self.ax.set_xlabel('ms', color=self._FG_DIM, fontsize=8)
-        self.ax.set_xlim(-self.display_ms, self.display_ms)
+        self.ax.set_xlim(self._view_offset_ms - self.display_ms, self._view_offset_ms + self.display_ms)
         self.ax.tick_params(colors=self._FG_DIM, labelsize=8)
         for spine in self.ax.spines.values():
             spine.set_color(self._BORDER)
@@ -1273,12 +1330,14 @@ class TransientSnapV2(ctk.CTk):
         elem = self._current_element()
         if elem is not None and elem.current_idx < elem.n_markers - 1:
             elem.current_idx += 1
+            self._view_offset_ms = 0.0
             self._show_current()
 
     def _prev(self):
         elem = self._current_element()
         if elem is not None and elem.current_idx > 0:
             elem.current_idx -= 1
+            self._view_offset_ms = 0.0
             self._show_current()
 
     def _accept(self):
