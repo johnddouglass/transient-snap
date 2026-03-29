@@ -1298,6 +1298,14 @@ class TransientSnapV2(ctk.CTk):
                 self.canvas.blit(self.ax.bbox)
             return
         self._last_mouse_xdata = event.xdata
+
+        if getattr(self, '_wide_zoom_active', False):
+            self._view_offset_ms = event.xdata
+            if hasattr(self, '_wide_pan_job'):
+                self.after_cancel(self._wide_pan_job)
+            self._wide_pan_job = self.after(16, self._show_current)
+            return
+
         self.cursor_line.set_xdata([event.xdata])
         self.cursor_line.set_visible(True)
         self.canvas.restore_region(self.canvas_bg)
