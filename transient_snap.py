@@ -11,6 +11,7 @@ Usage:
 
 import json
 import re
+import threading
 import tkinter as tk
 from tkinter import messagebox, filedialog
 import customtkinter as ctk
@@ -24,9 +25,42 @@ from matplotlib.figure import Figure
 
 from snap import (load_audio, save_markers_wav, save_markers_midi,
                   load_markers_midi, get_midi_track_info, extract_tempo_map)
+from onset import refine_all
 
 DEFAULT_TICK = str(Path(__file__).parent / "Tick_48k.wav")
 DEFAULT_SR = 48000
+
+# Per-instrument parameters for auto-refine.
+# Tuple: (low_hz, high_hz, onset_thr, onset_thr_dist, fwd_ms, clamp_to_midi, min_shift_ms)
+REFINE_PRESETS = {
+    "kick":     (40.0,   180.0,  0.05, None, 10.0, False, 0.0),
+    "snare":   (150.0,  1200.0,  0.10, 0.15, 12.0, False, 0.2),
+    "hihat":  (7000.0, 18000.0,  0.05, None, 10.0, False, 0.0),
+    "ride":   (5000.0, 16000.0,  0.05, None, 10.0, False, 0.0),
+    "crash":  (3000.0, 16000.0,  0.05, None, 10.0, False, 0.0),
+    "tom":      (80.0,   600.0,  0.05, None, 10.0, True,  0.0),
+    "overhead":  (0.0,     0.0,  0.05, None, 10.0, False, 0.0),
+    "room":      (0.0,     0.0,  0.05, None, 10.0, False, 0.0),
+}
+REFINE_PRESET_DEFAULT = (0.0, 0.0, 0.05, None, 10.0, False, 0.0)
+
+
+def _guess_refine_preset(name: str):
+    n = name.lower()
+    for key, preset in REFINE_PRESETS.items():
+        if key in n:
+            return preset
+    return REFINE_PRESET_DEFAULT
+
+
+def _default_auto_refine(name: str) -> bool:
+    """True if auto-refine should be on by default for this element name."""
+    n = name.lower()
+    if any(p in n for p in ["kick", "kik", "bass drum", "bassdrum"]):
+        return True
+    if re.search(r'\bbd\b', n):
+        return True
+    return False
 
 
 def _guess_element_name(track_name: str) -> str:
@@ -88,6 +122,7 @@ class KitElement:
         # Review state
         self.status = None  # 'pending', 'approved', 'manual'
         self.current_idx = 0
+        self.auto_refine = False
 
     @property
     def n_markers(self):
@@ -107,6 +142,7 @@ class KitElement:
             'note_values': self.note_values.tolist() if self.note_values is not None else None,
             'status': self.status,
             'current_idx': self.current_idx,
+            'auto_refine': self.auto_refine,
         }
 
     @classmethod
@@ -132,6 +168,7 @@ class KitElement:
 
         elem.status = d.get('status')
         elem.current_idx = d.get('current_idx', 0)
+        elem.auto_refine = d.get('auto_refine', False)
         return elem
 
 
@@ -170,6 +207,7 @@ class TransientSnapV2(ctk.CTk):
         self.display_ms = 5.0
         self.wide_zoom_ms = 200.0
         self._view_offset_ms = 0.0
+        self.place_key = 'q'
         self.output_ppq = 28800
         self._track_idx_map = {}
         self._track_combo_values = []
@@ -439,6 +477,7 @@ class TransientSnapV2(ctk.CTk):
         menubar.add_cascade(label="Settings", menu=settings_menu)
         settings_menu.add_command(label="Output PPQ...", command=self._set_ppq)
         settings_menu.add_command(label="W Key Zoom Level...", command=self._set_wide_zoom)
+        settings_menu.add_command(label="Place Marker Key...", command=self._set_place_key)
         settings_menu.add_command(label="Tick Sample...", command=self._set_tick)
         settings_menu.add_separator()
         settings_menu.add_checkbutton(label="Fixed 120 BPM MIDI Export",
@@ -456,7 +495,7 @@ class TransientSnapV2(ctk.CTk):
         self.bind_all('<minus>', self._on_key_zoom_out)
         self.bind_all('<equal>', self._on_key_zoom_in)
         self.bind_all('<plus>', self._on_key_zoom_in)
-        self.bind_all('q', self._on_key_place)
+        self.bind_all(self.place_key, self._on_key_place)
         self.bind_all('w', self._on_key_wide_press)
         self.bind_all('<KeyRelease-w>', self._on_key_wide_release)
         self.bind_all('v', self._on_key_waveform_mode)
@@ -772,6 +811,7 @@ class TransientSnapV2(ctk.CTk):
             elem = KitElement(group['name'])
             elem.midi_path = midi_path
             elem.track_indices = group['track_indices']
+            elem.auto_refine = group.get('auto_refine', False)
             self.elements.append(elem)
 
         self.current_element_idx = max(0, len(self.elements) - len(groups))
@@ -803,12 +843,13 @@ class TransientSnapV2(ctk.CTk):
         hdr.grid_columnconfigure(0, minsize=210)
         hdr.grid_columnconfigure(1, minsize=60)
         hdr.grid_columnconfigure(2, weight=1)
-        for col, text in enumerate(["MIDI Track", "Notes", "Kit Element  (blank = skip)"]):
+        hdr.grid_columnconfigure(3, minsize=95)
+        for col, text in enumerate(["MIDI Track", "Notes", "Kit Element  (blank = skip)", "Auto-Refine"]):
             ctk.CTkLabel(hdr, text=text,
                          font=ctk.CTkFont(size=10, weight="bold"),
                          text_color=self._FG_DIM).grid(
                 row=0, column=col,
-                sticky='w', padx=(12 if col == 0 else 4, 12 if col == 2 else 4),
+                sticky='w', padx=(12 if col == 0 else 4, 12 if col == 3 else 4),
                 pady=6)
 
         # Track rows
@@ -819,11 +860,14 @@ class TransientSnapV2(ctk.CTk):
         scroll.grid_columnconfigure(0, minsize=210)
         scroll.grid_columnconfigure(1, minsize=60)
         scroll.grid_columnconfigure(2, weight=1)
+        scroll.grid_columnconfigure(3, minsize=95)
 
         entry_vars = []
         for i, track in enumerate(tracks_with_notes):
-            var = tk.StringVar(value=_guess_element_name(track['name']))
-            entry_vars.append((track, var))
+            guessed = _guess_element_name(track['name'])
+            var = tk.StringVar(value=guessed)
+            ar_var = tk.BooleanVar(value=_default_auto_refine(guessed))
+            entry_vars.append((track, var, ar_var))
 
             ctk.CTkLabel(scroll, text=track['name'],
                          font=ctk.CTkFont(family='Menlo', size=11),
@@ -838,20 +882,28 @@ class TransientSnapV2(ctk.CTk):
             ctk.CTkEntry(scroll, textvariable=var, height=28,
                          fg_color=self._ENTRY, border_color=self._BORDER,
                          font=ctk.CTkFont(size=11)).grid(
-                row=i, column=2, sticky='ew', padx=(4, 12), pady=4)
+                row=i, column=2, sticky='ew', padx=(4, 4), pady=4)
+
+            ctk.CTkCheckBox(scroll, text="", variable=ar_var, width=20,
+                            fg_color=self._BLUE,
+                            hover_color='#5aa3e0',
+                            border_color=self._BORDER).grid(
+                row=i, column=3, padx=(8, 12), pady=4)
 
         result = [None]
 
         def on_import():
             groups_dict = {}
-            for track, var in entry_vars:
+            ar_dict = {}
+            for track, var, ar_var in entry_vars:
                 name = var.get().strip()
                 if name:
                     groups_dict.setdefault(name, []).append(track['index'])
+                    ar_dict[name] = ar_dict.get(name, False) or ar_var.get()
             if not groups_dict:
                 messagebox.showwarning("No Elements", "No kit elements defined.", parent=dialog)
                 return
-            result[0] = [{'name': n, 'track_indices': idxs}
+            result[0] = [{'name': n, 'track_indices': idxs, 'auto_refine': ar_dict[n]}
                          for n, idxs in groups_dict.items()]
             dialog.destroy()
 
@@ -964,6 +1016,57 @@ class TransientSnapV2(ctk.CTk):
                       fg_color=self._ENTRY, hover_color='#303338',
                       text_color=self._FG).pack(side='left', padx=6)
 
+        dialog.wait_window()
+
+    def _set_place_key(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Place Marker Key")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.after(100, dialog.lift)
+
+        current_display = self.place_key.strip('<>') if self.place_key.startswith('<') else self.place_key.upper()
+        ctk.CTkLabel(dialog, text=f"Current key: {current_display}",
+                     text_color=self._FG_DIM,
+                     font=ctk.CTkFont(size=11)).pack(padx=24, pady=(20, 4))
+        ctk.CTkLabel(dialog, text="Press any key to assign it as the Place Marker hotkey.",
+                     text_color=self._FG).pack(padx=24, pady=(0, 8))
+
+        waiting_label = ctk.CTkLabel(dialog, text="Waiting for keypress...",
+                                     font=ctk.CTkFont(size=13, weight="bold"),
+                                     text_color=self._BLUE)
+        waiting_label.pack(padx=24, pady=(0, 16))
+
+        BLOCKED = {'space', 'Return', 'Left', 'Right', 'Delete', 'BackSpace',
+                   'Shift_L', 'Shift_R', 'Control_L', 'Control_R',
+                   'Alt_L', 'Alt_R', 'Meta_L', 'Meta_R', 'Super_L', 'Super_R',
+                   'Escape', 'Tab', 'w'}
+
+        def on_key(event):
+            sym = event.keysym
+            if sym in BLOCKED:
+                waiting_label.configure(text=f"'{sym}' is reserved — try another key.",
+                                        text_color=self._AMBER)
+                return
+            # Determine binding string: single printable char or <Keysym>
+            if event.char and event.char.isprintable() and len(event.char) == 1:
+                new_binding = event.char.lower()
+                display = event.char.upper()
+            else:
+                new_binding = f'<{sym}>'
+                display = sym
+
+            old_binding = self.place_key
+            self.place_key = new_binding
+            self.unbind_all(old_binding)
+            self.bind_all(new_binding, self._on_key_place)
+            waiting_label.configure(text=f"Place Marker key set to: {display}",
+                                    text_color=self._GREEN)
+            dialog.after(800, dialog.destroy)
+
+        dialog.bind('<KeyPress>', on_key)
+        dialog.focus_set()
         dialog.wait_window()
 
     def _set_tick(self):
@@ -1244,10 +1347,71 @@ class TransientSnapV2(ctk.CTk):
             self._update_track_combo()
             self._rebuild_sidebar()
             self._show_current()
+            run_refine = elem.auto_refine
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load audio:\n{e}")
+            run_refine = False
         finally:
             self.configure(cursor="")
+
+        if run_refine:
+            self._start_auto_refine(elem)
+
+    # ── Auto-refine ──────────────────────────────────────────────────────
+
+    def _start_auto_refine(self, elem):
+        """Kick off auto-refine for one element in a background thread."""
+        self.progress_label.configure(
+            text=f"Auto-refining {elem.name}...", text_color=self._BLUE)
+        self.update_idletasks()
+
+        def worker():
+            summary, color = self._do_auto_refine(elem)
+            self.after(0, lambda: self.progress_label.configure(
+                text=summary, text_color=color))
+            self.after(0, self._rebuild_sidebar)
+            self.after(0, self._show_current)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_auto_refine(self, elem):
+        """Run refine_all for one element. Returns (summary_text, color). Called from worker thread."""
+        try:
+            n = elem.name.lower()
+            is_kick = (any(p in n for p in ["kick", "kik", "bass drum", "bassdrum"])
+                       or bool(re.search(r'\bbd\b', n)))
+
+            low_hz, high_hz, onset_thr, dist_thr, fwd_ms, clamp, min_shift = _guess_refine_preset(elem.name)
+            results = refine_all(
+                elem.audio, elem.sr, elem.original_positions,
+                low_hz=low_hz, high_hz=high_hz,
+                search_back_ms=3.0, search_fwd_ms=fwd_ms,
+                onset_threshold=onset_thr, onset_threshold_distant=dist_thr,
+                confidence_min=2.0, clamp_to_midi=clamp, min_shift_ms=min_shift,
+            )
+            moved = frozen = skipped = 0
+            for i, r in enumerate(results):
+                if elem.status[i] == 'manual':
+                    skipped += 1
+                    continue
+                if r.pass_used == 'frozen':
+                    elem.final_positions[i] = r.refined
+                    frozen += 1
+                else:
+                    pos = r.refined - 1 if is_kick else r.refined
+                    elem.final_positions[i] = max(0, pos)
+                    moved += 1
+            parts = []
+            if moved:
+                parts.append(f"{moved} moved")
+            if frozen:
+                parts.append(f"{frozen} frozen")
+            if skipped:
+                parts.append(f"{skipped} skipped")
+            summary = f"Auto-refine: {elem.name}: {' / '.join(parts) or 'no change'}"
+            return summary, self._GREEN
+        except Exception as e:
+            return f"Auto-refine failed ({elem.name}): {e}", self._AMBER
 
     # ── Zoom ─────────────────────────────────────────────────────────────
 
