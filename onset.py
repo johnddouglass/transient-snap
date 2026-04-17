@@ -238,6 +238,7 @@ def refine_position(
     search_fwd_ms: float = 10.0,
     onset_threshold: float = 0.05,
     onset_threshold_distant: float | None = None,
+    audio_click: np.ndarray | None = None,
     clamp_to_midi: bool = False,
     _pass_label: str = "primary",
 ) -> OnsetResult:
@@ -290,6 +291,16 @@ def refine_position(
                                   the snare onset edge.  Empirically, 0.15
                                   reduces residual error on such notes without
                                   affecting notes handled by the close path.
+        audio_click:              Optional click-band filtered audio for Stage 2
+                                  walk-back only.  When supplied, replaces
+                                  audio_raw in the CLOSE walk-back and
+                                  audio_filtered in the DISTANT walk-back.
+                                  Stage 1 amplitude weighting is unchanged.
+                                  Use to target the beater/stick click transient
+                                  (e.g. 200–3000 Hz for kick) rather than the
+                                  instrument's primary low-frequency body band.
+                                  Default None (use existing audio_raw /
+                                  audio_filtered for Stage 2 as before).
         clamp_to_midi:            When True, the refined position is clamped to
                                   ``position`` if detection would move the note
                                   *later* than the MIDI event.  Use for
@@ -480,9 +491,18 @@ def refine_position(
             # Stage 1 found the onset within ~2.67 ms of the MIDI note.
             #
             # Walk backward from (peak_sample + HOP_LENGTH) through the RAW
-            # wideband signal.  At each step, test the backward-looking max
-            # (ENV_WIN samples) against onset_threshold × local peak.  When
-            # the max drops below threshold, the onset edge is at i + 1.
+            # wideband signal (or audio_click if supplied).  At each step,
+            # test the backward-looking max (ENV_WIN samples) against
+            # onset_threshold × local peak.  When the max drops below
+            # threshold, the onset edge is at i + 1.
+            #
+            # audio_click override:
+            #   When audio_click is provided (e.g. 200–3000 Hz beater-click
+            #   band for kick), it replaces audio_raw in the Stage 2 walk-back.
+            #   Stage 1 amplitude weighting still uses audio_filtered (the
+            #   primary low-frequency band); only Stage 2 sample placement is
+            #   redirected to the click-band signal.  This targets the sharp
+            #   beater click rather than the slower low-frequency body onset.
             #
             # Envelope max, not individual samples:
             #   Raw audio oscillates through zero even when the sustained
@@ -511,15 +531,16 @@ def refine_position(
             #     • Large genuine offsets (> 2.67 ms) exit the close window
             #       and are handled by distant detection, which can move
             #       notes in either direction.
-            wb_start = min(peak_sample + HOP_LENGTH, len(audio_raw) - 1)
-            amp_end  = min(len(audio_raw), wb_start + HOP_LENGTH)
-            peak_amp = float(np.max(np.abs(audio_raw[wb_start:amp_end])))
+            _close_audio = audio_click if audio_click is not None else audio_raw
+            wb_start = min(peak_sample + HOP_LENGTH, len(_close_audio) - 1)
+            amp_end  = min(len(_close_audio), wb_start + HOP_LENGTH)
+            peak_amp = float(np.max(np.abs(_close_audio[wb_start:amp_end])))
             if peak_amp > 1e-10:
                 threshold = peak_amp * onset_threshold
                 ENV_WIN = 32  # backward-looking envelope window (samples)
                 for i in range(wb_start - 1, walk_limit - 1, -1):
                     win_lo    = max(0, i - ENV_WIN)
-                    local_max = float(np.max(np.abs(audio_raw[win_lo:i + 1])))
+                    local_max = float(np.max(np.abs(_close_audio[win_lo:i + 1])))
                     if local_max < threshold:
                         onset_sample = i + 1
                         break
@@ -580,15 +601,16 @@ def refine_position(
             #   a crash cymbal (mostly HF) has a much smaller envelope in
             #   150–1200 Hz than the snare onset — the filtered walk can find
             #   the quiet transition between the cymbal and the snare attack.
-            wb_start = min(peak_sample + HOP_LENGTH, len(audio_filtered) - 1)
-            amp_end  = min(len(audio_filtered), wb_start + HOP_LENGTH)
-            peak_amp = float(np.max(np.abs(audio_filtered[wb_start:amp_end])))
+            _dist_audio = audio_click if audio_click is not None else audio_filtered
+            wb_start = min(peak_sample + HOP_LENGTH, len(_dist_audio) - 1)
+            amp_end  = min(len(_dist_audio), wb_start + HOP_LENGTH)
+            peak_amp = float(np.max(np.abs(_dist_audio[wb_start:amp_end])))
             if peak_amp > 1e-10:
                 threshold = peak_amp * onset_threshold_distant
                 ENV_WIN   = 32  # same envelope window as close detection
                 for i in range(wb_start - 1, walk_limit - 1, -1):
                     win_lo    = max(0, i - ENV_WIN)
-                    local_max = float(np.max(np.abs(audio_filtered[win_lo:i + 1])))
+                    local_max = float(np.max(np.abs(_dist_audio[win_lo:i + 1])))
                     if local_max < threshold:
                         onset_sample = i + 1
                         break
@@ -655,6 +677,8 @@ def refine_all(
     confidence_min: float = 2.0,
     clamp_to_midi: bool = False,
     min_shift_ms: float = 0.0,
+    click_low_hz: float | None = None,
+    click_high_hz: float | None = None,
 ) -> list:
     """Refine a batch of drum hit positions with weighted onset detection.
 
@@ -728,11 +752,32 @@ def refine_all(
                                   noise shifts seen on correctly-placed snare
                                   notes while preserving all meaningful
                                   corrections (≥ 0.2 ms).
+        click_low_hz:             Lower cutoff (Hz) for an optional click-band
+                                  filter applied to Stage 2 walk-back only.
+                                  When set (along with click_high_hz), a
+                                  bandpass-filtered copy of the audio is
+                                  pre-computed once and passed to each
+                                  refine_position call as audio_click.  Stage 1
+                                  amplitude weighting uses the primary band
+                                  (low_hz / high_hz) unchanged.  Only Stage 2
+                                  sample placement uses the click-band signal.
+                                  Suggested range for kick: 200.0.  Default None
+                                  (no click-band; Stage 2 uses audio_raw and
+                                  audio_filtered as before).
+        click_high_hz:            Upper cutoff (Hz) for the click-band filter.
+                                  Suggested range for kick: 3000.0.  Default None.
 
     Returns:
         List of OnsetResult, one per input position, in the same order.
     """
     audio_filtered = bandpass(audio, low_hz, high_hz, sr)
+
+    # Pre-compute click-band audio for Stage 2 walk-back when requested.
+    # Filtered once across the full array (same reason as audio_filtered above).
+    if click_low_hz is not None or click_high_hz is not None:
+        audio_click = bandpass(audio, click_low_hz or 0.0, click_high_hz or 0.0, sr)
+    else:
+        audio_click = None
 
     # Pre-filter check: if no band filter was applied (wideband instrument),
     # audio_filtered IS audio_raw.  In that case skip the retry entirely —
@@ -749,6 +794,7 @@ def refine_all(
             search_fwd_ms=search_fwd_ms,
             onset_threshold=onset_threshold,
             onset_threshold_distant=onset_threshold_distant,
+            audio_click=audio_click,
             clamp_to_midi=clamp_to_midi,
             _pass_label="primary",
         )
@@ -767,6 +813,7 @@ def refine_all(
                 search_fwd_ms=search_fwd_ms,
                 onset_threshold=onset_threshold,
                 onset_threshold_distant=onset_threshold_distant,
+                audio_click=audio_click,
                 clamp_to_midi=clamp_to_midi,
                 _pass_label="wideband",
             )

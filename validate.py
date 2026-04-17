@@ -6,7 +6,7 @@ import soundfile as sf
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from onset import refine_all, refine_position, bandpass
 
-PROJECT = pathlib.Path("/Users/johndouglass/Desktop/new song")
+PROJECT = pathlib.Path("/Users/johndouglass/Desktop/_desktop/new song")
 
 def get_tempo(mid):
     for t in mid.tracks:
@@ -67,11 +67,26 @@ CONFIGS = [
     # fwd_ms=12.0 for snare: one note (idx 155) has its onset at 10.73 ms
     # after MIDI, outside the 10 ms window. At 12 ms, conf=9.99 and the
     # note lands within 1 ms of reference. 10 ms is enough for all others.
-    ("Kick MIDI",       "Kick MIDI",       "Kick In_01.wav",   40.0,  180.0, "Kick",   False, 0.0, 0.05, None, 10.0),
-    ("Snare MIDI",      "Snare MIDI",      "Sn Top D_01.wav", 150.0, 1200.0, "Snare",  False, 0.2, 0.10, 0.15, 12.0),
-    ("Snare Fill MIDI", "Snare Fill MIDI", "Sn Top D_01.wav", 150.0, 1200.0, "SnFill", False, 0.2, 0.10, 0.15, 12.0),
-    ("T1 MIDI",         "T1 MIDI",         "F Tom 1_01.wav",   80.0,  600.0, "T1",     True,  0.0, 0.05, None, 10.0),
-    ("T2 MIDI",         "T2 MIDI",         "R Tom_01.wav",     80.0,  600.0, "T2",     True,  0.0, 0.05, None, 10.0),
+    # (orig_track, ref_track, wav_file, low_hz, high_hz, label,
+    #  clamp_to_midi, min_shift_ms, onset_thresh, onset_thresh_dist, fwd_ms,
+    #  click_low_hz, click_high_hz)
+    #
+    # click_low_hz / click_high_hz: optional click-band filter for Stage 2
+    # walk-back only (Stage 1 amplitude weighting unchanged).  For kick the
+    # beater click lives in 200–3000 Hz; targeting that band in Stage 2 aims
+    # for the sharp transient edge rather than the slower LF body onset.
+    # None = no click-band override (use audio_raw / audio_filtered as before).
+    #
+    # min_shift_ms=0.021 for kick: sweep over [0, 1, 2, 3]-sample floors
+    # shows 250/265 notes already have zero shift; 1 extra note has a
+    # 1-sample noise move.  A 0.021 ms floor (1 sample at 48 kHz) freezes
+    # that noise move without affecting any of the 14 meaningful corrections.
+    # n_within5 and n_worse are identical to min_shift_ms=0.0.
+    ("Kick MIDI",       "Kick MIDI",       "Kick In_01.wav",   40.0,  180.0, "Kick",   False, 0.021, 0.05, None, 10.0, None,  None),
+    ("Snare MIDI",      "Snare MIDI",      "Sn Top D_01.wav", 150.0, 1200.0, "Snare",  False, 0.2,   0.10, 0.15, 12.0, None,  None),
+    ("Snare Fill MIDI", "Snare Fill MIDI", "Sn Top D_01.wav", 150.0, 1200.0, "SnFill", False, 0.2,   0.10, 0.15, 12.0, None,  None),
+    ("T1 MIDI",         "T1 MIDI",         "F Tom 1_01.wav",   80.0,  600.0, "T1",     True,  0.0,   0.05, None, 10.0, None,  None),
+    ("T2 MIDI",         "T2 MIDI",         "R Tom_01.wav",     80.0,  600.0, "T2",     True,  0.0,   0.05, None, 10.0, None,  None),
 ]
 
 def match_notes(orig_pos, ref_pos, window):
@@ -90,7 +105,7 @@ print(f"\n{'Track':<10} {'N':>4}  {'mean_err':>9}  {'|mean|':>6}  {'std':>6}  {'
 print("-" * 91)
 
 audio_cache = {}
-for orig_tk, ref_tk, wav_file, low_hz, high_hz, label, clamp_to_midi, min_shift_ms, onset_thresh, onset_thresh_dist, fwd_ms in CONFIGS:
+for orig_tk, ref_tk, wav_file, low_hz, high_hz, label, clamp_to_midi, min_shift_ms, onset_thresh, onset_thresh_dist, fwd_ms, click_low_hz, click_high_hz in CONFIGS:
     if wav_file not in audio_cache:
         a, _ = sf.read(str(PROJECT / wav_file), dtype='float32', always_2d=False)
         audio_cache[wav_file] = a[:, 0] if a.ndim > 1 else a
@@ -103,7 +118,8 @@ for orig_tk, ref_tk, wav_file, low_hz, high_hz, label, clamp_to_midi, min_shift_
     results = refine_all(audio, SR, mo, low_hz=low_hz, high_hz=high_hz,
         search_back_ms=3.0, search_fwd_ms=fwd_ms, onset_threshold=onset_thresh,
         onset_threshold_distant=onset_thresh_dist, confidence_min=2.0,
-        clamp_to_midi=clamp_to_midi, min_shift_ms=min_shift_ms)
+        clamp_to_midi=clamp_to_midi, min_shift_ms=min_shift_ms,
+        click_low_hz=click_low_hz, click_high_hz=click_high_hz)
 
     refined   = np.array([r.refined for r in results], dtype=int)
     err_ms    = (refined - mr) / SR * 1000.0

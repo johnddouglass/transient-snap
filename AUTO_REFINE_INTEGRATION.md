@@ -68,7 +68,7 @@ change them:
 ```python
 # (low_hz, high_hz, onset_thr, onset_thr_dist, fwd_ms, clamp_to_midi, min_shift_ms)
 REFINE_PRESETS = {
-    "kick":     (40.0,   180.0,  0.05, None, 10.0, False, 0.0),
+    "kick":     (40.0,   180.0,  0.05, None, 10.0, False, 0.021),
     "snare":    (150.0, 1200.0,  0.10, 0.15, 12.0, False, 0.2),
     "hihat":   (7000.0,18000.0,  0.05, None, 10.0, False, 0.0),
     "ride":    (5000.0,16000.0,  0.05, None, 10.0, False, 0.0),
