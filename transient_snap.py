@@ -53,13 +53,7 @@ def _guess_refine_preset(name: str):
     return REFINE_PRESET_DEFAULT
 
 
-def _default_auto_refine(name: str) -> bool:
-    """True if auto-refine should be on by default for this element name."""
-    n = name.lower()
-    if any(p in n for p in ["kick", "kik", "bass drum", "bassdrum"]):
-        return True
-    if re.search(r'\bbd\b', n):
-        return True
+def _default_auto_refine(_name: str) -> bool:
     return False
 
 
@@ -216,6 +210,8 @@ class TransientSnapV2(ctk.CTk):
         self.cursor_line = None
         self.canvas_bg = None
         self._last_mouse_xdata = None
+        self.scroll_sensitivity = 1.0
+        self._wide_zoom_pan_var = tk.BooleanVar(value=False)
 
         self._blink_state = False
         self._blink_btns = []
@@ -458,6 +454,11 @@ class TransientSnapV2(ctk.CTk):
                                         text_color=self._FG_DIM)
         self._st_manual.pack(side='left', padx=12)
 
+        self._st_saved = ctk.CTkLabel(status_bar, text="",
+                                       font=ctk.CTkFont(family='Menlo', size=10),
+                                       text_color=self._GREEN)
+        self._st_saved.pack(side='right', padx=14)
+
     def _build_menu(self):
         menubar = tk.Menu(self)
         self.configure(menu=menubar)
@@ -477,6 +478,9 @@ class TransientSnapV2(ctk.CTk):
         menubar.add_cascade(label="Settings", menu=settings_menu)
         settings_menu.add_command(label="Output PPQ...", command=self._set_ppq)
         settings_menu.add_command(label="W Key Zoom Level...", command=self._set_wide_zoom)
+        settings_menu.add_checkbutton(label="W Key: Pan Waveform with Mouse",
+                                      variable=self._wide_zoom_pan_var)
+        settings_menu.add_command(label="Scroll Sensitivity...", command=self._set_scroll_sensitivity)
         settings_menu.add_command(label="Place Marker Key...", command=self._set_place_key)
         settings_menu.add_command(label="Tick Sample...", command=self._set_tick)
         settings_menu.add_separator()
@@ -621,7 +625,8 @@ class TransientSnapV2(ctk.CTk):
         if not hasattr(self, '_wide_zoom_active') or not self._wide_zoom_active:
             return
         self._wide_zoom_active = False
-        self._view_offset_ms = self._last_mouse_xdata if self._last_mouse_xdata is not None else 0.0
+        self._view_offset_ms = (self._last_mouse_xdata if self._last_mouse_xdata is not None else 0.0) \
+            if self._wide_zoom_pan_var.get() else 0.0
         self.display_ms = self._saved_display_ms
         self.zoom_var.set(self.display_ms)
         self.zoom_label.configure(text=f"±{self.display_ms:.1f}ms")
@@ -765,7 +770,24 @@ class TransientSnapV2(ctk.CTk):
         }
         with open(path, 'w') as f:
             json.dump(data, f, indent=2)
-        messagebox.showinfo("Saved", f"Project saved to:\n{path}")
+        self._show_save_indicator()
+
+    def _show_save_indicator(self):
+        _STEPS = ['#10b981', '#0c7a5e', '#08503e', '#04271e']
+        _DELAYS = [0, 500, 900, 1200]
+        if hasattr(self, '_save_fade_jobs'):
+            for job in self._save_fade_jobs:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+        self._save_fade_jobs = []
+        self._st_saved.configure(text="✓ Saved")
+        for delay, color in zip(_DELAYS, _STEPS):
+            self._save_fade_jobs.append(
+                self.after(delay, lambda c=color: self._st_saved.configure(text_color=c)))
+        self._save_fade_jobs.append(
+            self.after(1500, lambda: self._st_saved.configure(text="")))
 
     # ── Import MIDI / link audio ──────────────────────────────────────────
 
@@ -1006,6 +1028,56 @@ class TransientSnapV2(ctk.CTk):
                 dialog.destroy()
             except ValueError as e:
                 messagebox.showerror("Invalid", f"Invalid zoom value: {e}")
+
+        entry.bind('<Return>', lambda _: on_ok())
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color='transparent')
+        btn_frame.pack(pady=(0, 16))
+        ctk.CTkButton(btn_frame, text="OK", command=on_ok, width=80).pack(side='left', padx=6)
+        ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy, width=80,
+                      fg_color=self._ENTRY, hover_color='#303338',
+                      text_color=self._FG).pack(side='left', padx=6)
+
+        dialog.wait_window()
+
+    def _set_scroll_sensitivity(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Scroll Sensitivity")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.after(100, dialog.lift)
+
+        ctk.CTkLabel(dialog, text="Zoom change per scroll tick (ms):",
+                     text_color=self._FG).pack(padx=20, pady=(20, 8))
+
+        sens_var = tk.StringVar(value=str(self.scroll_sensitivity))
+        entry = ctk.CTkEntry(dialog, textvariable=sens_var, width=140,
+                             fg_color=self._ENTRY, border_color=self._BORDER)
+        entry.pack(padx=20, pady=(0, 10))
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        preset_frame = ctk.CTkFrame(dialog, fg_color='transparent')
+        preset_frame.pack(pady=(0, 10))
+        ctk.CTkLabel(preset_frame, text="Presets:", text_color=self._FG_DIM).pack(side='left', padx=(0, 6))
+        for val in [1.0, 5.0, 20.0, 50.0]:
+            ctk.CTkButton(preset_frame, text=f"{val}ms",
+                          command=lambda v=val: sens_var.set(str(v)),
+                          width=62, height=26,
+                          fg_color=self._ENTRY, hover_color='#303338',
+                          text_color=self._FG,
+                          font=ctk.CTkFont(size=11)).pack(side='left', padx=2)
+
+        def on_ok():
+            try:
+                val = float(sens_var.get())
+                if val <= 0:
+                    raise ValueError("Sensitivity must be positive")
+                self.scroll_sensitivity = val
+                dialog.destroy()
+            except ValueError as e:
+                messagebox.showerror("Invalid", f"Invalid value: {e}")
 
         entry.bind('<Return>', lambda _: on_ok())
 
@@ -1447,9 +1519,13 @@ class TransientSnapV2(ctk.CTk):
         if self._current_element() is None:
             return
         if event.button == 'up':
-            self._zoom_in()
+            self.display_ms = max(1.0, self.display_ms - self.scroll_sensitivity)
         elif event.button == 'down':
-            self._zoom_out()
+            self.display_ms = min(200.0, self.display_ms + self.scroll_sensitivity)
+        else:
+            return
+        self.zoom_var.set(self.display_ms)
+        self._on_zoom(self.display_ms)
 
     def _on_motion(self, event):
         if self.cursor_line is None or self.canvas_bg is None:
@@ -1464,11 +1540,13 @@ class TransientSnapV2(ctk.CTk):
         self._last_mouse_xdata = event.xdata
 
         if getattr(self, '_wide_zoom_active', False):
-            self._view_offset_ms = event.xdata
-            if hasattr(self, '_wide_pan_job'):
-                self.after_cancel(self._wide_pan_job)
-            self._wide_pan_job = self.after(16, self._show_current)
-            return
+            if self._wide_zoom_pan_var.get():
+                self._view_offset_ms = event.xdata
+                if hasattr(self, '_wide_pan_job'):
+                    self.after_cancel(self._wide_pan_job)
+                self._wide_pan_job = self.after(16, self._show_current)
+                return
+            # No-movement mode: let _last_mouse_xdata update, fall through to cursor blit
 
         self.cursor_line.set_xdata([event.xdata])
         self.cursor_line.set_visible(True)
