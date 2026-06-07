@@ -211,7 +211,6 @@ class TransientSnapV2(ctk.CTk):
         self.canvas_bg = None
         self._last_mouse_xdata = None
         self.scroll_sensitivity = 1.0
-        self._wide_zoom_pan_var = tk.BooleanVar(value=False)
 
         self._blink_state = False
         self._blink_btns = []
@@ -478,8 +477,6 @@ class TransientSnapV2(ctk.CTk):
         menubar.add_cascade(label="Settings", menu=settings_menu)
         settings_menu.add_command(label="Output PPQ...", command=self._set_ppq)
         settings_menu.add_command(label="W Key Zoom Level...", command=self._set_wide_zoom)
-        settings_menu.add_checkbutton(label="W Key: Pan Waveform with Mouse",
-                                      variable=self._wide_zoom_pan_var)
         settings_menu.add_command(label="Scroll Sensitivity...", command=self._set_scroll_sensitivity)
         settings_menu.add_command(label="Place Marker Key...", command=self._set_place_key)
         settings_menu.add_command(label="Tick Sample...", command=self._set_tick)
@@ -625,8 +622,8 @@ class TransientSnapV2(ctk.CTk):
         if not hasattr(self, '_wide_zoom_active') or not self._wide_zoom_active:
             return
         self._wide_zoom_active = False
-        self._view_offset_ms = (self._last_mouse_xdata if self._last_mouse_xdata is not None else 0.0) \
-            if self._wide_zoom_pan_var.get() else 0.0
+        # Reposition the view to wherever the mouse was pointing on release.
+        self._view_offset_ms = self._last_mouse_xdata if self._last_mouse_xdata is not None else 0.0
         self.display_ms = self._saved_display_ms
         self.zoom_var.set(self.display_ms)
         self.zoom_label.configure(text=f"±{self.display_ms:.1f}ms")
@@ -1316,7 +1313,11 @@ class TransientSnapV2(ctk.CTk):
         self.fig.tight_layout(rect=[0, 0, 1, 1])
         self.canvas.draw()
         self.canvas_bg   = self.canvas.copy_from_bbox(self.ax.bbox)
-        self.cursor_line = self.ax.axvline(0, color='white', linewidth=0.5, alpha=0.3)
+        if getattr(self, '_wide_zoom_active', False):
+            # While zoomed out, the cursor line marks where the view will recenter.
+            self.cursor_line = self.ax.axvline(0, color=self._GREEN, linewidth=1.2, alpha=0.8)
+        else:
+            self.cursor_line = self.ax.axvline(0, color='white', linewidth=0.5, alpha=0.3)
         self.cursor_line.set_visible(False)
 
         if self._last_mouse_xdata is not None:
@@ -1538,15 +1539,6 @@ class TransientSnapV2(ctk.CTk):
                 self.canvas.blit(self.ax.bbox)
             return
         self._last_mouse_xdata = event.xdata
-
-        if getattr(self, '_wide_zoom_active', False):
-            if self._wide_zoom_pan_var.get():
-                self._view_offset_ms = event.xdata
-                if hasattr(self, '_wide_pan_job'):
-                    self.after_cancel(self._wide_pan_job)
-                self._wide_pan_job = self.after(16, self._show_current)
-                return
-            # No-movement mode: let _last_mouse_xdata update, fall through to cursor blit
 
         self.cursor_line.set_xdata([event.xdata])
         self.cursor_line.set_visible(True)
